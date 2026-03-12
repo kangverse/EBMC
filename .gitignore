@@ -1,0 +1,45 @@
+# Dataset (large files - download separately per README)
+dataset/
+
+# Saved outputs
+saved/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter Notebooks
+*.ipynb
+
+# Logs and results
+log/
+logs/
+*.log
+
+# Model checkpoints
+*.pt
+*.pth
+*.bin
+*.ckpt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Visualization outputs (large)
+*.pdf
+*.png
