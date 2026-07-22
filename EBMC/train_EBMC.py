@@ -199,7 +199,12 @@ def train_or_eval_ebmc(args, model, reg_loss, cls_loss, dataloader,
         acc_a = accuracy_score((labels_all[nz] > 0), (preds_a[nz] > 0))
         acc_t = accuracy_score((labels_all[nz] > 0), (preds_t[nz] > 0))
         acc_v = accuracy_score((labels_all[nz] > 0), (preds_v[nz] > 0))
-        return mae, corr, acc, f1, [acc_a, acc_t, acc_v]
+        # Acc-7: 7-class accuracy over ALL samples, clip to [-3,3] then round-and-compare
+        # (same as LNLN core/metric.py __multiclass_acc)
+        p7 = np.clip(preds.squeeze(), -3.0, 3.0)
+        l7 = np.clip(labels_all, -3.0, 3.0)
+        acc7 = float(np.mean(np.round(p7) == np.round(l7)))
+        return mae, corr, acc, f1, [acc_a, acc_t, acc_v], acc7
 
 
 if __name__ == '__main__':
@@ -285,6 +290,7 @@ if __name__ == '__main__':
     )
 
     folder_mae, folder_corr, folder_acc, folder_f1 = [], [], [], []
+    folder_acc7 = []
 
     for fold_idx in range(args.num_folder):
         print(f"\n===== Fold {fold_idx + 1}/{args.num_folder} =====")
@@ -303,7 +309,7 @@ if __name__ == '__main__':
         best_acc = -1.0
         best_model = None
         current_stage = 1
-        test_maes, test_corrs, test_accs, test_fscores = [], [], [], []
+        test_maes, test_corrs, test_accs, test_fscores, test_acc7s = [], [], [], [], []
 
         for epoch in range(args.epochs):
             first_stage = epoch < args.stage_epoch
@@ -325,11 +331,13 @@ if __name__ == '__main__':
 
             train_acc_atv = train_res[4]
             mae, corr, acc, f1 = test_res[0], test_res[1], test_res[2], test_res[3]
+            acc7 = test_res[5] if len(test_res) > 5 else 0.0
 
             test_maes.append(mae)
             test_corrs.append(corr)
             test_accs.append(acc)
             test_fscores.append(f1)
+            test_acc7s.append(acc7)
 
             if first_stage:
                 print(f'epoch:{epoch}; a_acc:{train_acc_atv[0]:.3f}; t_acc:{train_acc_atv[1]:.3f}; v_acc:{train_acc_atv[2]:.3f}')
@@ -366,11 +374,13 @@ if __name__ == '__main__':
         folder_corr.append(test_corrs[best_idx])
         folder_acc.append(test_accs[best_idx])
         folder_f1.append(test_fscores[best_idx])
+        folder_acc7.append(test_acc7s[best_idx])
 
         print(f'Step3: Fold {fold_idx+1} best epoch={best_idx}')
         if args.dataset in ['CMUMOSI', 'CMUMOSEI']:
             print(f"  mae={test_maes[best_idx]:.4f}  corr={test_corrs[best_idx]:.4f}"
-                  f"  f1={test_fscores[best_idx]:.4f}  acc={test_accs[best_idx]:.4f}")
+                  f"  f1={test_fscores[best_idx]:.4f}  acc={test_accs[best_idx]:.4f}"
+                  f"  acc7={test_acc7s[best_idx]:.4f}")
         else:
             print(f"  acc={test_accs[best_idx]:.4f}  ua={test_corrs[best_idx]:.4f}")
 
@@ -378,7 +388,8 @@ if __name__ == '__main__':
     if args.dataset in ['CMUMOSI', 'CMUMOSEI']:
         print(f"Folder avg ({args.test_condition}): "
               f"mae={np.mean(folder_mae):.4f}  corr={np.mean(folder_corr):.4f}"
-              f"  f1={np.mean(folder_f1):.4f}  acc={np.mean(folder_acc):.4f}")
+              f"  f1={np.mean(folder_f1):.4f}  acc={np.mean(folder_acc):.4f}"
+              f"  acc7={np.mean(folder_acc7):.4f}")
     else:
         print(f"Folder avg ({args.test_condition}): "
               f"acc={np.mean(folder_acc):.4f}  ua={np.mean(folder_corr):.4f}")

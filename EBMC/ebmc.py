@@ -91,6 +91,13 @@ class EBMC(nn.Module):
         # IMTD temperature
         self.imtd_tau = getattr(args, 'imtd_tau', 1.0)
 
+        # (opt-in) Sequence variant: frame -> sample masked-mean readout.
+        # Default False: behavior is byte-identical to the original per-position
+        # prediction (Setup-A and the pooled Setup-B are unaffected). When True,
+        # a single masked-mean pooling over the frame axis is applied BEFORE the
+        # four modules (see forward); MSD/CCE/EMC/IMTD and all heads are unchanged.
+        self.frame_seq = getattr(args, 'frame_seq', False)
+
     def _prepare_inputs(self, inputfeats, input_features_mask, umask):
         """Split modalities, project to D_e, compute attention mask and routing weights."""
         audio = inputfeats[:, :, :self.adim]
@@ -173,10 +180,38 @@ class EBMC(nn.Module):
             inputfeats, input_features_mask, umask
         )
 
-        # Soft-MoE Transformer
+        # Soft-MoE Transformer (processes the frame sequence; per-frame
+        # attention masking is provided by attn_mask)
         x_a = self.block(fa, first_stage, attn_mask, 'a')
         x_t = self.block(ft, first_stage, attn_mask, 't')
         x_v = self.block(fv, first_stage, attn_mask, 'v')
+
+        # (opt-in) Sequence readout: frame -> single sample.
+        # The transformer above already models the frame sequence with per-frame
+        # masking; here we masked-mean-pool over the frame axis so MSD/CCE/EMC/IMTD
+        # and all heads run unchanged on seq_len=1 with a sample-level label/umask.
+        # This is the only operation added for the sequence variant.
+        if getattr(self, 'frame_seq', False):
+            ma = attn_mask[:, :seq_len].float()
+            mt = attn_mask[:, seq_len:2 * seq_len].float()
+            mv = attn_mask[:, 2 * seq_len:3 * seq_len].float()
+
+            def _mpool(x, m):  # x:[B,seq,X] -> [B,1,X]
+                w = m.unsqueeze(-1)
+                return (x * w).sum(1, keepdim=True) / w.sum(1, keepdim=True).clamp_min(1e-6)
+
+            x_a, x_t, x_v = _mpool(x_a, ma), _mpool(x_t, mt), _mpool(x_v, mv)
+            if not first_stage:
+                def _mpool4(w4, m):  # w4:[B,seq,3,De] -> [B,1,3,De]
+                    w = m.unsqueeze(-1).unsqueeze(-1)
+                    return (w4 * w).sum(1, keepdim=True) / w.sum(1, keepdim=True).clamp_min(1e-6)
+                weight_a = _mpool4(weight_a, ma)
+                weight_t = _mpool4(weight_t, mt)
+                weight_v = _mpool4(weight_v, mv)
+            seq_len = 1
+            # keep frame-level `umask` here (the Stage-II teacher re-runs on the
+            # full frame sequence); the pooled parts use a sample-level ones-mask
+            # derived inside _forward_stage1/2.
 
         if first_stage:
             return self._forward_stage1(
@@ -193,6 +228,8 @@ class EBMC(nn.Module):
     def _forward_stage1(self, x_a, x_t, x_v, B, seq_len, label, umask,
                         do_cf, weight_save):
         """Stage-I: train unimodal experts with MSD + CCE."""
+        if getattr(self, 'frame_seq', False):   # frames pooled -> sample-level mask
+            umask = torch.ones(B, 1, device=x_a.device)
         logits_a = self.nlp_head_a(x_a)
         logits_t = self.nlp_head_t(x_t)
         logits_v = self.nlp_head_v(x_v)
@@ -234,6 +271,9 @@ class EBMC(nn.Module):
                         B, seq_len, label, umask, do_cf, weight_save,
                         inputfeats, input_features_mask):
         """Stage-II: train fusion model with MSD + CCE + EMC + IMTD."""
+        # frames pooled -> sample-level mask for the pooled parts;
+        # the teacher (below) still receives the frame-level `umask`.
+        umask_s = torch.ones(B, 1, device=x_a.device) if getattr(self, 'frame_seq', False) else umask
         # Routing weighted sum: [B, L, 3*D_e] -> [B, L, D_e]
         x_un_a = x_a.view(B, seq_len, 3, self.D_e)
         x_un_t = x_t.view(B, seq_len, 3, self.D_e)
@@ -251,7 +291,7 @@ class EBMC(nn.Module):
         (z_a_c, z_t_c, z_v_c,
          z_a_s, z_t_s, z_v_s,
          cid_losses) = self.cid_integration(
-            x_out_a, x_out_t, x_out_v, y=label, umask=umask, return_loss=True
+            x_out_a, x_out_t, x_out_v, y=label, umask=umask_s, return_loss=True
         )
         loss_disentangle = cid_losses['inv'] + cid_losses['dis'] + 0.1 * cid_losses['uni']
 
@@ -279,7 +319,7 @@ class EBMC(nn.Module):
             x_out_a, x_out_t, x_out_v,
             logits_a, logits_t, logits_v,
             t_logits_a, t_logits_t, t_logits_v,
-            label, umask, self.args,
+            label, umask_s, self.args,
             emc_alpha=self.emc_alpha,
             emc_beta=self.emc_beta,
             emc_gamma=self.emc_gamma,
@@ -288,7 +328,7 @@ class EBMC(nn.Module):
         # IMTD: Instance-aware Modality Trust Distillation
         imtd_loss = compute_imtd_loss(
             logits_c, t_logits_a, t_logits_t, t_logits_v,
-            umask, self.args, imtd_tau=self.imtd_tau,
+            umask_s, self.args, imtd_tau=self.imtd_tau,
         )
 
         losses = {

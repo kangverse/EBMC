@@ -6,12 +6,7 @@ Datasets:
   - CMU-MOSEI: ~23,453 utterances from 3,228 videos (single speaker)
   - Task      : Sentiment regression, labels ∈ [-3, 3]
   - Evaluation: Non-zero binary classification (positive/negative, zero excluded)
-
-Pre-extracted utterance-level features:
-    Audio  : wav2vec-large-c-UTT  (dim=512)
-    Text   : deberta-large-4-UTT  (dim=1024)
-    Visual : manet_UTT            (dim=512)
-
+  
 Since CMU-MOSI/MOSEI are monologue datasets (single speaker per video),
 only the Host stream carries real features; the Guest stream is zero-padded.
 This preserves the same dual-stream interface as the IEMOCAP loader,

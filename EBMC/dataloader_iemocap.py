@@ -3,11 +3,7 @@ IEMOCAP Dataloader for EBMC (Enhance-then-Balance Modality Collaboration).
 
 Dataset: IEMOCAP (4-class / 6-class emotion recognition)
   - Emotion classes (4-class): neutral, happy/excited, angry, sad
-  - Structure: dyadic conversations between two speakers (F: Female host, M: Male guest)
-  - Pre-extracted utterance-level features:
-      Audio  : wav2vec-large-c-UTT  (dim=512)
-      Text   : deberta-large-4-UTT  (dim=1024)
-      Visual : manet_UTT            (dim=512)
+
 
 Each conversation (video) is represented as a sequence of utterances.
 For each utterance, features are split into Host (F) and Guest (M) streams,

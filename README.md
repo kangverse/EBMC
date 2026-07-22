@@ -36,18 +36,17 @@ pip install -r requirements.txt
 Pre-extracted utterance-level features follow the preprocessing pipeline of [GCNet](https://github.com/zeroQiaoba/GCNet).
 
 > **Scope of this repository (please read).**
-> This repository covers the **main results (Tables 1–2)** and the **missing-modality** robustness experiments. All results here were produced with the **utterance-level** features released below:
-> - text = `deberta-large-4-UTT` (1024-d), audio = `wav2vec-large-c-UTT` (512-d), visual = `manet_UTT` (1024-d), following the [GCNet](https://github.com/zeroQiaoba/GCNet) convention.
->
-> Missingness in this repository is **modality-level only** — a whole modality is either present or absent (the seven conditions `a t v at av tv atv`). These are the exact features and settings passed to `train_EBMC.py` in the run scripts.
->
-> **This repository does _not_ include the Q3 missing-rate experiments** (frame-level intra-modality missingness at rates `p ∈ {0, 0.1, …, 0.9}`). Those are a separate, supplementary pipeline built on the [LNLN](https://github.com/Haoyu-ha/LNLN) framework, using MMSA sequence-level features (with timestep information).
+> This repository covers the **main results (Tables 1–2)** and the **missing-modality** robustness experiments. All results here follow the [GCNet](https://github.com/zeroQiaoba/GCNet) convention.
+> The main run scripts (`run_ebmc_*.sh` / `train_EBMC.py`) perform **modality-level** missingness — a whole modality is either present or absent (the seven conditions `a t v at av tv atv`) — with the utterance-level features above.
 
 | Dataset | Task | Download |
 |:---:|:---:|:---:|
 | IEMOCAP (4-class) | Emotion Recognition | [Google Drive](https://drive.google.com/file/d/1Hn82-ZD0CNqXQtImd982YHHi-3gIX2G3/view?usp=share_link) |
 | CMU-MOSI | Sentiment Analysis | [Google Drive](https://drive.google.com/file/d/1aJxArYfZsA-uLC0sOwIkjl_0ZWxiyPxj/view?usp=share_link) |
 | CMU-MOSEI | Sentiment Analysis | [Google Drive](https://drive.google.com/file/d/1L6oDbtpFW2C4MwL5TQsEflY1WHjtv7L5/view?usp=share_link) |
+
+>
+> **This repository also includes the frame-level missing-rate experiments** (intra-modality missingness at rates `p ∈ {0, 0.1, …, 0.9}`) — see [Robustness under Different Missing Rates](#robustness-under-different-missing-rates-intra-modality-missingness). This part is implemented **directly on the EBMC model** (the four modules are unchanged; only the data path differs), **aligned to the [LNLN](https://github.com/Haoyu-ha/LNLN) evaluation protocol** (same metrics / missing semantics), using **MMSA sequence-level features** (with timestep information). It is **not** a re-implementation of the LNLN framework itself — see the note at the end of that section for the exact alignment boundary.
 
 After downloading, organise as:
 
@@ -56,9 +55,9 @@ dataset/
 ├── CMUMOSI/
 │   ├── CMUMOSI_features_raw_2way.pkl
 │   └── features/
-│       ├── wav2vec-large-c-UTT/    # audio features  (dim=512)
-│       ├── deberta-large-4-UTT/    # text features   (dim=1024)
-│       └── manet_UTT/              # visual features (dim=1024)
+│       ├── wav2vec-large-c-UTT/
+│       ├── deberta-large-4-UTT/
+│       └── manet_UTT/
 ├── CMUMOSEI/
 │   └── (same structure)
 └── IEMOCAP/
@@ -124,17 +123,82 @@ bash run_ebmc_iemocap.sh
 ```
 ---
 
+## Robustness under Different Missing Rates (intra-modality missingness)
+
+The scripts above test **modality-level** missingness (a whole modality present/absent, the seven `test_condition`s). This section corresponds to the paper's Q3 **frame-level missing-rate** experiment: following LNLN's practice, on each modality we randomly drop frame-level features at a missing rate `p` to simulate intra-modality missingness, evaluating `p` from 0 to 0.9 and averaging over all rates.
+
+The EBMC model and its four modules (MSD/CCE/EMC/IMTD) remain unchanged; only the data path differs. The frame sequence is first processed by EBMC's Soft-MoE Transformer (with per-frame attention masking), then a single masked-mean frame→sample readout collapses it into one prediction. Script: `EBMC/train_ebmc_seq.py`.
+
+### Data (MMSA)
+
+Uses the **MMSA `unaligned_50.pkl`** features (download via [MMSA](https://github.com/thuiar/MMSA)); each sample keeps per-frame sequences with valid `*_lengths`:
+
+| Dataset | text | audio (COVAREP) | visual (Facet) |
+|:---:|:---:|:---:|:---:|
+| CMU-MOSI  | BERT `[50,768]` | `[375,5]` | `[500,20]` |
+| CMU-MOSEI | BERT `[50,768]` | `[500,74]` | `[500,35]` |
+
+Place the data at `dataset/MMSA/{MOSI,MOSEI}/unaligned_50.pkl` under the repo root (the default), or point to another location with the `MMSA_ROOT` environment variable:
+
+```bash
+export MMSA_ROOT=/path/to/your/MMSA   # optional; defaults to ./dataset/MMSA
+```
+
+Extra dependencies beyond the Environment section: `scikit-learn`, `pandas`, `einops`.
+
+### Run
+
+```bash
+python -u EBMC/train_ebmc_seq.py --dataset=mosi  --gpu=0 --seed=1111 \
+    --epochs=100 --stage_epoch=50 --batch-size=16 --T=500
+python -u EBMC/train_ebmc_seq.py --dataset=mosei --gpu=0 --seed=1111 \
+    --epochs=100 --stage_epoch=50 --batch-size=16 --T=500
+```
+
+Multiple seeds (report the mean over seeds `1111 1112 1113`). When running seeds in parallel, give each run its own `EBMC_SAVED_ROOT` so the Stage-II teacher checkpoints do not overwrite each other:
+
+```bash
+for s in 1111 1112 1113; do
+    EBMC_SAVED_ROOT=$PWD/saved_seq_mosi_$s python -u EBMC/train_ebmc_seq.py \
+        --dataset=mosi --gpu=0 --seed=$s --epochs=100 --stage_epoch=50 --batch-size=16 --T=500
+done
+```
+
+`T` is the unified number of timesteps to which the frame sequences are padded. Per-rate results are written to `EBMC/missing_rate/results_seq/`, one file per dataset/seed, with the `avg` row being the mean over the 10 rates.
+
+### Note on the comparison (please read)
+This adapts EBMC to a sequence-level missing-rate evaluation. The metric formulas, missing semantics, and evaluation flow all follow LNLN, but it is not fully identical to LNLN: all modalities are padded to a common length `T`, and a single masked-mean readout is added to collapse frames into one prediction; text uses the pre-extracted BERT features (dropped frames zeroed) rather than passing UNK tokens through BERT.
+
+Please also note: for easier reproduction and a unified codebase, we have integrated the missing-rate code into the EBMC framework and partially refactored the earlier LNLN-based Q3 experiment. As a result, the reproduced numbers differ slightly from those reported in the paper.
+
+---
+
 ## Citation
 
 ```bibtex
-@inproceedings{ebmc2026cvpr,
-  title     = {Enhance-then-Balance Modality Collaboration for Robust Multimodal Sentiment Analysis},
-  booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-  year      = {2026}
+@inproceedings{he2026enhance,
+  title={Enhance-then-Balance Modality Collaboration for Robust Multimodal Sentiment Analysis},
+  author={He, Kang and Ding, Yuzhe and Wang, Xinrong and Li, Fei and Teng, Chong and Ji, Donghong},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  pages={30183--30193},
+  year={2026}
 }
 ```
 
 ---
+
+## Acknowledgements
+
+This implementation refers to and reuses several excellent open-source works, which we gratefully acknowledge:
+
+- [LNLN](https://github.com/Haoyu-ha/LNLN): the evaluation protocol for the missing-rate robustness experiments, together with the frame-level masking (`generate_m`) and the metric computation (`core/metric.py`), are taken directly from this repository (marked with "from LNLN" comments in our code).
+- [MoMKE](https://github.com/wxxv/MoMKE): its framework and training pipeline for incomplete multimodal learning served as a reference for this project.
+- [GCNet](https://github.com/zeroQiaoba/GCNet): the utterance-level feature preprocessing follows its convention.
+- [MMSA](https://github.com/thuiar/MMSA): the sequence-level features (`unaligned_50.pkl`) come from this dataset toolkit.
+
+We thank the authors of these works for their open-source contributions.
+
+We also thank Zhouyi for the valuable feedback, which prompted us to promptly add the previously missing code and to further improve this repository.
 
 ## License
 
